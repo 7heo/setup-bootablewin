@@ -1,0 +1,79 @@
+#!/bin/sh
+
+# TODO:
+# check what Windows version the iso is in order to write the appropriate boot sector.
+# check dependencies (ms-sys, fdisk, id, grep, wc, mount, cut, rev, sed, tr, ntfs-3g, sync)
+
+usage()
+{
+	echo "$0 <iso file> <device>"
+	exit 1
+}
+
+mkfsflags="-f"
+
+[ "$1" == "-s" -o "$1" == "--secure" ] && unset mkfsflags && shift
+
+[ $(id -u) -ne 0 ] && echo "You need to be root to execute that script." >&2 && exit 1
+[ $(echo "$1" | grep "\.iso$" | wc -l) -eq 0 ] && usage
+[ ! -f "$1" ] && usage
+[ ! -b "$2" ] && usage
+[ $(mount | grep "$2" | wc -l) -ne 0 ] && echo "$2 has one (or more) partition already mounted. Please make sure they are unmounted." >&2 && exit 1
+[ $(fdisk -l "$2" | grep Disklabel | wc -l) -ne 1 ] && echo "$2 is a partition. A device is needed instead." >&2 && exit 1
+
+DeviceMarketingName="$(ls -l /dev/disk/by-id/ | grep -v part | sed 's/\.\.\/\.\.\//\/dev\//g' | grep "$2" | rev | cut -d\  -f3 | cut -d_ -f2- | rev | cut -d- -f2- | tr '_' ' ')"
+DeviceSize="$(fdisk -l "$2" | grep "^Disk $2" | cut -d\  -f 3-4 | tr -d ',')"
+
+echo -n "WARNING: You are about to wipe: $DeviceMarketingName (size: $DeviceSize). Please confirm by typing \"YES\"): "
+read confirmation
+
+[ "$confirmation" != "YES" ] && echo "Aborted by user." >&2 && exit
+
+fdisk "$2" > /dev/null << EOF
+o
+n
+
+
+
+
+t
+7
+a
+w
+EOF
+echo "> Partition table created"
+sleep 1
+echo "> Creating partition"
+[ -z $mkfsflags ] && mkfs.ntfs "${2}1"
+[ ! -z $mkfsflags ] && mkfs.ntfs "$mkfsflags" "${2}1"
+echo "mkfs.ntfs $mkfsflags ${2}1"
+echo "> Partition created"
+
+echo "> Mounting partition"
+mountpointpart="$(mktemp -d)"
+mountpointiso="$(mktemp -d)"
+mount -t ntfs-3g "${2}1" "$mountpointpart" 2>&1 > /dev/null
+[ $? -ne 0 ] && echo "Mounting the NTFS partition failed. Aborted." >&2 && exit 1
+echo "> Mouting iso"
+mount -o loop "$1" "$mountpointiso" 2>&1 > /dev/null
+[ $? -ne 0 ] && echo "Mounting the iso failed. Please check the iso file. Aborted." >&2 && exit 1
+
+echo "> Writing boot sector (in Master Boot Record)"
+ms-sys -7 "$2"
+
+echo "> Copying files"
+wd=$PWD
+cd "$mountpointiso"
+cp -r . "$mountpointpart/"
+cd $wd
+sync
+
+echo "> Unmounting partition"
+umount $mountpointpart
+rmdir $mountpointpart
+
+echo "> Unmounting iso"
+umount $mountpointiso
+rmdir $mountpointiso
+
+echo "# Finished #"
